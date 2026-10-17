@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -76,6 +77,30 @@ func (r *Recorder) Record(ctx context.Context, e Entry) error {
 	defer cancel()
 
 	if _, err := r.pool.Exec(ctx, insertEntrySQL, args...); err != nil {
+		return fmt.Errorf("audit: record entry: %w", err)
+	}
+	return nil
+}
+
+// Execer is satisfied by pgx.Tx, *pgx.Conn and *pgxpool.Pool.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// RecordTx inserts e using db, normally the caller's transaction, so the
+// audit row commits or rolls back together with the audited change.
+// Record, by contrast, writes through the pool outside any transaction: a
+// change could commit while its audit row is lost, or the reverse.
+//
+// Unlike Record it adds no timeout of its own; the transaction's context
+// governs it. As with Record, the returned error must be checked —
+// returning it from the transaction function aborts the change too.
+func RecordTx(ctx context.Context, db Execer, e Entry) error {
+	args, err := argsFor(e)
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(ctx, insertEntrySQL, args...); err != nil {
 		return fmt.Errorf("audit: record entry: %w", err)
 	}
 	return nil
