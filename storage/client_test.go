@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 func TestNewRequiresSettings(t *testing.T) {
@@ -127,5 +130,59 @@ func TestErrObjectMissingWraps(t *testing.T) {
 	err := fmt.Errorf("%w: 2026-07/fondo/archivo.jpeg", ErrObjectMissing)
 	if !errors.Is(err, ErrObjectMissing) {
 		t.Error("the wrapped error should be recognizable with errors.Is")
+	}
+}
+
+// fakeS3 answers every request with the given status and records the last one.
+func fakeS3(t *testing.T, status int) (*Client, *http.Request) {
+	t.Helper()
+	var last http.Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		last = *r.Clone(r.Context())
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(server.Close)
+	mc, err := minio.New(strings.TrimPrefix(server.URL, "http://"), &minio.Options{
+		Creds: credentials.NewStaticV4("key", "secret", ""), Region: "us-east-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Client{mc: mc, bucket: "attachments"}, &last
+}
+
+func TestDeleteSendsADeleteForTheKey(t *testing.T) {
+	client, last := fakeS3(t, http.StatusNoContent)
+
+	if err := client.Delete(context.Background(), "2026-07/general/abc12345-boleta.pdf"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if last.Method != http.MethodDelete {
+		t.Errorf("method = %s, want DELETE", last.Method)
+	}
+	if !strings.HasSuffix(last.URL.Path, "/attachments/2026-07/general/abc12345-boleta.pdf") {
+		t.Errorf("path = %q, want it to target the bucket and key", last.URL.Path)
+	}
+}
+
+// S3 deletes are idempotent: a retried cleanup must not fail because the
+// object is already gone.
+func TestDeleteOfAMissingObjectIsNotAnError(t *testing.T) {
+	client, _ := fakeS3(t, http.StatusNotFound)
+
+	if err := client.Delete(context.Background(), "gone.pdf"); err != nil {
+		t.Errorf("Delete of a missing object = %v, want nil", err)
+	}
+}
+
+func TestDeleteReportsRealFailures(t *testing.T) {
+	client, _ := fakeS3(t, http.StatusInternalServerError)
+
+	err := client.Delete(context.Background(), "x.pdf")
+	if err == nil {
+		t.Fatal("expected an error when the store fails")
+	}
+	if !strings.Contains(err.Error(), "x.pdf") {
+		t.Errorf("error = %q, want it to name the key", err)
 	}
 }

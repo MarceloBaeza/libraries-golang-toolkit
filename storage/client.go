@@ -177,6 +177,22 @@ func (c *Client) Download(ctx context.Context, id string) ([]byte, error) {
 	return content, nil
 }
 
+// Delete removes an object previously stored by Upload, addressed by the
+// id it returned. Deleting an object that is already gone is not an error
+// (S3 deletes are idempotent), so callers can retry cleanups freely.
+func (c *Client) Delete(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	if err := c.mc.RemoveObject(ctx, c.bucket, id, minio.RemoveObjectOptions{}); err != nil {
+		if isMissingObject(err) {
+			return nil
+		}
+		return fmt.Errorf("storage: delete %s: %w", id, err)
+	}
+	return nil
+}
+
 // isMissingObject distinguishes "this object isn't there" from any other
 // storage failure, so callers know whether to re-upload or retry later.
 func isMissingObject(err error) bool {
