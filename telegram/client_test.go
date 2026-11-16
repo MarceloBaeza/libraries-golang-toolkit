@@ -175,3 +175,58 @@ func TestContextCancellation(t *testing.T) {
 		t.Fatalf("token leaked: %v", err)
 	}
 }
+
+func TestSendDocumentMultipart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bot"+token+"/sendDocument" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("multipart: %v", err)
+		}
+		if r.FormValue("chat_id") != "42" || r.FormValue("caption") != "Informe" {
+			t.Errorf("fields: chat=%q caption=%q", r.FormValue("chat_id"), r.FormValue("caption"))
+		}
+		if !strings.Contains(r.FormValue("reply_markup"), `"inline_keyboard"`) {
+			t.Errorf("reply_markup: %q", r.FormValue("reply_markup"))
+		}
+		f, h, err := r.FormFile("document")
+		if err != nil {
+			t.Fatalf("document: %v", err)
+		}
+		data, _ := io.ReadAll(f)
+		if h.Filename != "informe.pdf" || string(data) != "%PDF-1.4 test" {
+			t.Errorf("file: %q %q", h.Filename, data)
+		}
+		io.WriteString(w, `{"ok":true,"result":{"message_id":9,"chat":{"id":42,"type":"private"}}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, token, srv.Client())
+	m, err := c.SendDocument(context.Background(), SendDocumentParams{
+		ChatID: 42, FileName: "informe.pdf", Data: []byte("%PDF-1.4 test"), Caption: "Informe",
+		ReplyMarkup: &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{{Text: "Menú", CallbackData: "m:menu"}}}},
+	})
+	if err != nil || m.MessageID != 9 {
+		t.Fatalf("send: %+v %v", m, err)
+	}
+}
+
+func TestSendDocumentRejectsEmptyAndHuge(t *testing.T) {
+	c := NewClient("http://127.0.0.1:1", token, nil)
+	if _, err := c.SendDocument(context.Background(), SendDocumentParams{ChatID: 1}); err == nil {
+		t.Fatal("empty document must fail")
+	}
+	if _, err := c.SendDocument(context.Background(), SendDocumentParams{ChatID: 1, Data: make([]byte, MaxUploadBytes+1)}); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("expected ErrFileTooLarge, got %v", err)
+	}
+}
+
+func TestSendDocumentErrorDoesNotLeakToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Close()
+	_, err := NewClient(srv.URL, token, nil).SendDocument(context.Background(), SendDocumentParams{ChatID: 1, Data: []byte("x")})
+	if err == nil || strings.Contains(err.Error(), token) {
+		t.Fatalf("expected error without token, got %v", err)
+	}
+}

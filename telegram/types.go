@@ -169,6 +169,18 @@ type SendMessageParams struct {
 	ReplyMarkup any    `json:"reply_markup,omitempty"`
 }
 
+// SendDocumentParams are the arguments of sendDocument. Data is the file
+// content, uploaded as multipart; FileName is what the user sees. ReplyMarkup
+// accepts the same keyboards as SendMessageParams.
+type SendDocumentParams struct {
+	ChatID      int64
+	FileName    string
+	Data        []byte
+	Caption     string
+	ParseMode   string
+	ReplyMarkup any
+}
+
 // EditMessageTextParams are the arguments of editMessageText (only inline
 // keyboards can be attached to edited messages).
 type EditMessageTextParams struct {

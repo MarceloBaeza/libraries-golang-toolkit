@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,7 +80,11 @@ func (c *Client) call(ctx context.Context, method string, params, out any) error
 		return fmt.Errorf("telegram %s: build request failed", method)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, method, out)
+}
 
+// do sends req and decodes the Bot API envelope into out.
+func (c *Client) do(req *http.Request, method string, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		var urlErr *url.Error
@@ -153,7 +159,69 @@ func (c *Client) SetMyCommands(ctx context.Context, cmds []BotCommand) error {
 	}{cmds}, nil)
 }
 
-// ErrFileTooLarge is returned by DownloadFile when the file exceeds maxBytes.
+// MaxUploadBytes is the Bot API limit for files sent by a bot (50 MB).
+const MaxUploadBytes = 50 << 20
+
+// SendDocument uploads a file (multipart/form-data) and sends it as a
+// document. Errors never include the request URL, because it contains the
+// token.
+func (c *Client) SendDocument(ctx context.Context, p SendDocumentParams) (Message, error) {
+	const method = "sendDocument"
+	var m Message
+	if len(p.Data) == 0 {
+		return m, fmt.Errorf("telegram %s: empty document", method)
+	}
+	if len(p.Data) > MaxUploadBytes {
+		return m, ErrFileTooLarge
+	}
+	name := p.FileName
+	if name == "" {
+		name = "document"
+	}
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	fields := map[string]string{"chat_id": strconv.FormatInt(p.ChatID, 10)}
+	if p.Caption != "" {
+		fields["caption"] = p.Caption
+	}
+	if p.ParseMode != "" {
+		fields["parse_mode"] = p.ParseMode
+	}
+	if p.ReplyMarkup != nil {
+		rm, err := json.Marshal(p.ReplyMarkup)
+		if err != nil {
+			return m, fmt.Errorf("telegram %s: encode reply_markup: %w", method, err)
+		}
+		fields["reply_markup"] = string(rm)
+	}
+	for k, v := range fields {
+		if err := w.WriteField(k, v); err != nil {
+			return m, fmt.Errorf("telegram %s: encode: %w", method, err)
+		}
+	}
+	part, err := w.CreateFormFile("document", name)
+	if err != nil {
+		return m, fmt.Errorf("telegram %s: encode: %w", method, err)
+	}
+	if _, err := part.Write(p.Data); err != nil {
+		return m, fmt.Errorf("telegram %s: encode: %w", method, err)
+	}
+	if err := w.Close(); err != nil {
+		return m, fmt.Errorf("telegram %s: encode: %w", method, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+c.token+"/"+method, &body)
+	if err != nil {
+		return m, fmt.Errorf("telegram %s: build request failed", method)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	err = c.do(req, method, &m)
+	return m, err
+}
+
+// ErrFileTooLarge is returned by DownloadFile when the file exceeds maxBytes,
+// and by SendDocument when the document exceeds MaxUploadBytes.
 var ErrFileTooLarge = errors.New("telegram: file too large")
 
 // GetFile resolves a file_id into a downloadable path.
